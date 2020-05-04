@@ -12,6 +12,7 @@
 namespace Symfony\Component\Mailer\Bridge\Postmark\Transport;
 
 use Psr\Log\LoggerInterface;
+use Symfony\Component\Mailer\Bridge\Postmark\Mime\Header\TemplateModelHeader;
 use Symfony\Component\Mailer\Envelope;
 use Symfony\Component\Mailer\Exception\HttpTransportException;
 use Symfony\Component\Mailer\Header\MetadataHeader;
@@ -46,7 +47,7 @@ class PostmarkApiTransport extends AbstractApiTransport
 
     protected function doSendApi(SentMessage $sentMessage, Email $email, Envelope $envelope): ResponseInterface
     {
-        $response = $this->client->request('POST', 'https://'.$this->getEndpoint().'/email', [
+        $response = $this->client->request('POST', $this->getApiResource($email), [
             'headers' => [
                 'Accept' => 'application/json',
                 'X-Postmark-Server-Token' => $this->key,
@@ -64,6 +65,11 @@ class PostmarkApiTransport extends AbstractApiTransport
         return $response;
     }
 
+    private function withTemplate(Email $email): bool
+    {
+        return $email->getHeaders()->has('with-template');
+    }
+
     private function getPayload(Email $email, Envelope $envelope): array
     {
         $payload = [
@@ -72,13 +78,36 @@ class PostmarkApiTransport extends AbstractApiTransport
             'Cc' => implode(',', $this->stringifyAddresses($email->getCc())),
             'Bcc' => implode(',', $this->stringifyAddresses($email->getBcc())),
             'ReplyTo' => implode(',', $this->stringifyAddresses($email->getReplyTo())),
-            'Subject' => $email->getSubject(),
-            'TextBody' => $email->getTextBody(),
-            'HtmlBody' => $email->getHtmlBody(),
-            'Attachments' => $this->getAttachments($email),
         ];
 
-        $headersToBypass = ['from', 'to', 'cc', 'bcc', 'subject', 'content-type', 'sender', 'reply-to'];
+        if (false === $this->withTemplate($email)) {
+            $payload = array_merge(
+                $payload,
+                [
+                    'Subject' => $email->getSubject(),
+                    'TextBody' => $email->getTextBody(),
+                    'HtmlBody' => $email->getHtmlBody(),
+                    'Attachments' => $this->getAttachments($email),
+                ]
+            );
+        } else {
+            $template = null;
+            if (null !== $email->getTextBody()) {
+                $template = $email->getTextBody();
+            } else {
+                $template = $email->getHtmlBody();
+            }
+
+            // check if it's template id or template alias
+            $templateId = (int) $template;
+            if (0 !== $templateId) {
+                $payload['TemplateId'] = $templateId;
+            } else {
+                $payload['TemplateAlias'] = $template;
+            }
+        }
+
+        $headersToBypass = ['from', 'to', 'cc', 'bcc', 'subject', 'content-type', 'sender', 'reply-to', 'with-template'];
         foreach ($email->getHeaders()->all() as $name => $header) {
             if (\in_array($name, $headersToBypass, true)) {
                 continue;
@@ -92,6 +121,12 @@ class PostmarkApiTransport extends AbstractApiTransport
 
             if ($header instanceof MetadataHeader) {
                 $payload['Metadata'][$header->getKey()] = $header->getValue();
+
+                continue;
+            }
+
+            if ($header instanceof TemplateModelHeader) {
+                $payload['TemplateModel'][$header->getKey()] = $header->getValue();
 
                 continue;
             }
@@ -132,5 +167,15 @@ class PostmarkApiTransport extends AbstractApiTransport
     private function getEndpoint(): ?string
     {
         return ($this->host ?: self::HOST).($this->port ? ':'.$this->port : '');
+    }
+
+    private function getApiResource(Email $email): string
+    {
+        $path = $this->getEndpoint().'/email';
+        if ($this->withTemplate($email)) {
+            $path .= '/withTemplate';
+        }
+
+        return 'https://'.$path;
     }
 }
